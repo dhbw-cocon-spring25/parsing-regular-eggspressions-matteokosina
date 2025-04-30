@@ -1,7 +1,9 @@
 package de.dhbw.mh.redeggs;
 
-import static de.dhbw.mh.redeggs.Range.range;
-import static de.dhbw.mh.redeggs.Range.single;
+
+
+import java.util.Set;
+
 
 /**
  * A parser for regular expressions using recursive descent parsing.
@@ -9,7 +11,9 @@ import static de.dhbw.mh.redeggs.Range.single;
  * tree representation of a {@link RegularEggspression}.
  */
 public class RecursiveDescentRedeggsParser {
-
+	private String regexInput;
+	private int initialLength = 0;
+	private static final Set<Character> SPECIAL_LITERAL = Set.of('(', ')', '[', ']', '|', '*', '^', '\3');
 	/**
 	 * The symbol factory used to create symbols for the regular expression.
 	 */
@@ -38,15 +42,182 @@ public class RecursiveDescentRedeggsParser {
 	 * @throws RedeggsParseException if the parsing fails or the regex is invalid
 	 */
 	public RegularEggspression parse(String regex) throws RedeggsParseException {
-		// TODO: Implement the recursive descent parsing to convert `regex` into an AST.
-		// This is a placeholder implementation to demonstrate how to create a symbol.
+		this.regexInput = regex;
+		this.initialLength = regexInput.length();
+		initialLength ++; // fix offset by test-suite
 
-		// Create a new symbol using the symbol factory
-		VirtualSymbol symbol = symbolFactory.newSymbol()
-				.include(single('_'), range('a', 'z'), range('A', 'Z'))
-				.andNothingElse();
+		if(regexInput.length() == 1) {
+			switch (peek()) {
+				case 'ε':
+					return new RegularEggspression.EmptyWord();
+				case '∅':
+					return new RegularEggspression.EmptySet();
+			}
+		}
+		RegularEggspression regularEggspression = parseRegex();
+		if (this.peek() != '\3') {
+			throw new RedeggsParseException("Unexpected symbol '" + this.peek() + "' at position " + (initialLength - regexInput.length()) + ".",initialLength - regexInput.length());
+		}
+		return regularEggspression;
+	}
 
-		// Return a dummy Literal RegularExpression for now
-		return new RegularEggspression.Literal(symbol);
+	// look at first character of regexInput without consuming
+	private char peek() {
+		if(regexInput.isEmpty()) {
+			return '\3'; // EOF
+		}
+		return regexInput.charAt(0);
+	}
+
+	// look at first character of regexInput and consume it
+	private char pop() {
+		char c = peek();
+		if(c != '\3') {
+			regexInput = regexInput.substring(1);
+		}
+		return c;
+	}
+
+	private boolean isLiteral(char c) {
+		return !SPECIAL_LITERAL.contains(c);
+	}
+
+	private RegularEggspression parseRegex() throws RedeggsParseException {
+		// check select-set of initial-production in grammar
+		char c = peek();
+		if (c == '('|| c == '[' || isLiteral(c)) {
+			// create production nodes
+			RegularEggspression concat = concat();
+			return union(concat);
+		} else {
+			throw new RedeggsParseException("Unexpected symbol '" + c + "' at position " + (initialLength - regexInput.length()) + ".", initialLength - regexInput.length());
+		}
+	}
+
+	private RegularEggspression union(RegularEggspression left) throws RedeggsParseException {
+
+		if (peek() == '|') {
+			pop(); // consume '|'
+			RegularEggspression right = concat();
+			return new RegularEggspression.Alternation(left, union(right));
+		}else if (peek() == '\3' || peek() == ')') {
+			return left;
+		}
+		throw new RedeggsParseException("Unexpected symbol '" + peek() + "' at position " + (initialLength - regexInput.length()) + ".", initialLength - regexInput.length());
+	}
+
+	private RegularEggspression concat() throws RedeggsParseException {
+		if (peek() == '(' || peek() == '[' || isLiteral(peek())) {
+			RegularEggspression k = kleene();
+			return suffix(k);
+		}
+		throw new RedeggsParseException("Unexpected symbol '" + peek() + "' at position " + (initialLength - regexInput.length()) + ".", initialLength - regexInput.length());
+	}
+
+	private RegularEggspression suffix(RegularEggspression l) throws RedeggsParseException {
+		if (isLiteral(peek()) || peek() == '(' || peek() == '[') {
+			RegularEggspression k = kleene();
+			return new RegularEggspression.Concatenation(l, suffix(k));
+		} else if (peek() == '\3' || peek() == ')' || peek() == '|') {
+			return l;
+		}
+
+		throw new RedeggsParseException("Unexpected symbol '" + peek() + "' at position " + (initialLength - regexInput.length()) + ".", initialLength - regexInput.length());
+	}
+
+	private RegularEggspression kleene() throws RedeggsParseException {
+		if (peek() == '(' || peek() == '[' || isLiteral(peek())) {
+			RegularEggspression b = base();
+			return star(b);
+		}
+		throw new RedeggsParseException("Unexpected symbol '" + peek() + "' at position " + (initialLength - regexInput.length()) + ".", initialLength - regexInput.length());
+	}
+
+	private RegularEggspression star(RegularEggspression b) throws RedeggsParseException {
+		if (peek() == '*') {
+			pop(); // consume '*'
+			return new RegularEggspression.Star(b);
+		} else if (isLiteral(peek()) || peek() == '(' || peek() == '[' || peek() == '\3' || peek() == ')' || peek() == '|') {
+			return b;
+		}
+		throw new RedeggsParseException("Unexpected symbol '" + peek() + "' at position " + (initialLength - regexInput.length()) + ".", initialLength - regexInput.length());
+	}
+
+	private RegularEggspression base() throws RedeggsParseException {
+		char select = peek();
+		if (isLiteral(select)) {
+			pop();
+			VirtualSymbol v = symbolFactory.newSymbol().include(CodePointRange.single(select)).andNothingElse();
+			return new RegularEggspression.Literal(v);
+		} else if (select == '(') {
+			pop();
+			RegularEggspression r = parseRegex();
+			if (pop() != ')') {
+				throw new RedeggsParseException("Input ended unexpectedly, expected symbol ')' at position " + (initialLength - regexInput.length()) + ".", initialLength - regexInput.length());
+			}
+			return r;
+		} else if (select == '[') {
+			pop();
+			boolean neg = negation();
+			SymbolFactory.Builder inhalt = inhalt(symbolFactory.newSymbol(), neg);
+			SymbolFactory.Builder range = range(inhalt, neg);
+			if(pop() != ']') {
+				throw new RedeggsParseException("Input ended unexpectedly, expected symbol ']' at position " + (initialLength - regexInput.length()) + ".", initialLength - regexInput.length());
+			}
+
+			return new RegularEggspression.Literal(range.andNothingElse());
+		}
+		throw new RedeggsParseException("Unexpected symbol '" + peek() + "' at position " + (initialLength - regexInput.length()) + ".", initialLength - regexInput.length());
+	}
+
+	private boolean negation() throws RedeggsParseException {
+		if (peek() == '^') {
+			pop(); // consume '^'
+			return true;
+		} else if (isLiteral(peek())) {
+			return false;
+		}
+		throw new RedeggsParseException("Unexpected symbol '" + peek() + "' at position " + (initialLength - regexInput.length()) + ".", initialLength - regexInput.length());
+	}
+
+	private SymbolFactory.Builder range(SymbolFactory.Builder builder, boolean neg) throws RedeggsParseException {
+		if (isLiteral(peek())) {
+			SymbolFactory.Builder inhalt = inhalt(builder, neg);
+			return range(inhalt, neg);
+		} else if (peek() == ']') {
+			return builder;
+		}
+		throw new RedeggsParseException("Unexpected symbol '" + peek() + "' at position " + (initialLength - regexInput.length()) + ".", initialLength - regexInput.length());
+	}
+
+	private SymbolFactory.Builder inhalt(SymbolFactory.Builder builder, boolean neg) throws RedeggsParseException {
+		char select = peek();
+		if (isLiteral(select)) {
+			pop(); // consume literal
+			CodePointRange rest = rest(select);
+			if (neg) {
+				return builder.exclude(rest);
+			} else {
+				return builder.include(rest);
+			}
+		}
+		throw new RedeggsParseException("Unexpected symbol '" + peek() + "' at position " + (initialLength - regexInput.length()) + ".", initialLength - regexInput.length());
+	}
+
+	private CodePointRange rest(char c) throws RedeggsParseException {
+		char select = peek();
+		if (select == '-') {
+			pop();
+			char consumed = pop();
+			if(!isLiteral(consumed)){
+				throw new RedeggsParseException(
+						"Input ended unexpectedly, expected literal at position " + (initialLength - regexInput.length()) + ".",
+						initialLength - regexInput.length());
+			}
+			return CodePointRange.range(c, consumed);
+		} else if (isLiteral(peek()) || peek() == ']') {
+			return CodePointRange.single(c);
+		}
+		throw new RedeggsParseException("Unexpected symbol '" + peek() + "' at position " + (initialLength - regexInput.length()) + ".", initialLength - regexInput.length());
 	}
 }
